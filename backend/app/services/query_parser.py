@@ -1,42 +1,43 @@
 """Parse natural language BJJ queries into structured search intent.
 
-"armbar from the back" → technique=armbar, position=back mount, type=submission
+"armbar from the back" → technique=armbar, position=back control, type=submission
 "how to escape mount"  → technique=escape, position=mount, type=escape
-"darce choke setup"    → technique=darce choke, type=setup
+"darce choke setup"    → technique=darce choke, type=submission
 
-Uses a vocabulary built from actual data in the DB (positions, techniques,
-aliases, types) so it adapts as more content is ingested.
+Uses the canonical taxonomy for normalization so queries always match
+the fixed categories, positions, and technique groups stored in the DB.
 """
 
 import logging
 import re
 from dataclasses import dataclass, field
-from functools import lru_cache
+
+from app.services.taxonomy import (
+    CATEGORIES,
+    POSITIONS,
+    normalize_category,
+    normalize_position,
+    normalize_technique,
+)
 
 logger = logging.getLogger(__name__)
-
-# technique_type values from the tagger
-TECHNIQUE_TYPES = {
-    "submission", "sweep", "pass", "escape", "takedown",
-    "transition", "control", "defense", "setup", "concept",
-}
 
 # Words that signal a technique type in the query
 TYPE_SIGNALS: dict[str, str] = {
     "submission": "submission", "sub": "submission", "finish": "submission",
     "choke": "submission", "lock": "submission", "strangle": "submission",
     "sweep": "sweep", "reversal": "sweep",
-    "pass": "pass", "passing": "pass",
-    "escape": "escape", "escaping": "escape", "defend": "defense",
-    "defense": "defense", "defensive": "defense",
+    "pass": "guard pass", "passing": "guard pass", "guard pass": "guard pass",
+    "escape": "escape", "escaping": "escape",
+    "defend": "control", "defense": "control", "defensive": "control",
     "takedown": "takedown", "throw": "takedown",
-    "transition": "transition", "chain": "transition",
     "control": "control", "pin": "control", "pinning": "control",
-    "setup": "setup", "entry": "setup", "entries": "setup",
     "concept": "concept", "principle": "concept", "theory": "concept",
+    "counter": "counter",
+    "retention": "guard retention", "retain": "guard retention",
+    "guard retention": "guard retention",
 }
 
-# Prepositions and connectors to strip when extracting the core technique
 _FILLER = {
     "from", "in", "on", "at", "to", "the", "a", "an", "with", "for",
     "how", "do", "does", "you", "i", "when", "while", "against",
@@ -44,26 +45,50 @@ _FILLER = {
     "what", "is", "are", "best", "way", "ways", "show", "me",
 }
 
-# Common position aliases that users type vs what's stored in the DB
+# Position keywords users type → canonical position (+ variants for fuzzy matching)
 POSITION_ALIASES: dict[str, list[str]] = {
-    "back": ["back mount", "back control", "rear mount"],
-    "back mount": ["back mount", "back control", "rear mount"],
+    "back": ["back control"],
+    "back control": ["back control"],
+    "back mount": ["back control"],
     "mount": ["mount"],
-    "side control": ["side control", "cross body ride", "cross side"],
-    "half guard": ["half guard", "deep half"],
+    "side control": ["side control"],
+    "half guard": ["half guard"],
     "closed guard": ["closed guard"],
-    "open guard": ["open guard", "butterfly guard", "seated guard"],
+    "open guard": ["open guard"],
     "butterfly": ["butterfly guard"],
+    "butterfly guard": ["butterfly guard"],
+    "deep half": ["deep half guard"],
+    "deep half guard": ["deep half guard"],
+    "de la riva": ["de la riva guard"],
+    "dlr": ["de la riva guard"],
+    "reverse de la riva": ["reverse de la riva guard"],
+    "rdlr": ["reverse de la riva guard"],
+    "x guard": ["x guard"],
+    "single leg x": ["single leg x"],
+    "slx": ["single leg x"],
+    "spider guard": ["spider guard"],
+    "lasso": ["lasso guard"],
+    "rubber guard": ["rubber guard"],
+    "octopus guard": ["octopus guard"],
+    "z guard": ["z guard"],
+    "knee shield": ["z guard"],
     "turtle": ["turtle"],
     "half": ["half guard"],
-    "guard": ["guard", "closed guard", "open guard", "half guard", "butterfly guard"],
+    "guard": ["closed guard", "open guard", "half guard", "butterfly guard"],
     "standing": ["standing"],
-    "top": ["top position", "top control", "top pinning position"],
-    "bottom": ["bottom position", "bottom side control"],
-    "crucifix": ["back crucifix"],
+    "top": ["top position"],
+    "bottom": ["bottom position"],
+    "crucifix": ["crucifix"],
+    "truck": ["truck"],
     "front headlock": ["front headlock"],
-    "north south": ["north-south"],
-    "north-south": ["north-south"],
+    "north south": ["north south"],
+    "north-south": ["north south"],
+    "leg entanglement": ["leg entanglement"],
+    "ashi garami": ["leg entanglement"],
+    "50/50": ["50/50"],
+    "fifty fifty": ["50/50"],
+    "seated": ["seated guard"],
+    "seated guard": ["seated guard"],
 }
 
 
@@ -75,8 +100,8 @@ class ParsedQuery:
     position_variants: list[str] = field(default_factory=list)
     technique_type: str | None = None
     raw_query: str = ""
-    residual: str = ""  # leftover terms not matched to any field
-    is_structured: bool = False  # True if we found at least technique OR position
+    residual: str = ""
+    is_structured: bool = False
 
     def __repr__(self):
         parts = []
@@ -100,16 +125,23 @@ def parse_query(query: str) -> ParsedQuery:
     q_words = q.split()
     detected_type = None
     type_words_found: set[str] = set()
-    for word in q_words:
-        if word in TYPE_SIGNALS:
-            detected_type = TYPE_SIGNALS[word]
-            type_words_found.add(word)
+
+    # Try multi-word type signals first
+    for signal, cat in TYPE_SIGNALS.items():
+        if " " in signal and signal in q:
+            detected_type = cat
+            type_words_found.update(signal.split())
+
+    if not detected_type:
+        for word in q_words:
+            if word in TYPE_SIGNALS:
+                detected_type = TYPE_SIGNALS[word]
+                type_words_found.add(word)
 
     if detected_type:
         result.technique_type = detected_type
 
-    # --- 2. Extract position ---
-    # Try longest-match first (e.g. "side control" before "side")
+    # --- 2. Extract position (longest match first) ---
     position_found = None
     position_span = ""
     sorted_positions = sorted(POSITION_ALIASES.keys(), key=len, reverse=True)
@@ -122,23 +154,21 @@ def parse_query(query: str) -> ParsedQuery:
             break
 
     # --- 3. Extract technique name ---
-    # Remove position and type words, then what's left is the technique
     remaining = q
     if position_span:
         remaining = remaining.replace(position_span, " ")
     for tw in type_words_found:
         remaining = re.sub(rf'\b{re.escape(tw)}\b', ' ', remaining)
 
-    # Remove filler words
     tech_words = [w for w in remaining.split() if w not in _FILLER and len(w) > 1]
     technique_candidate = " ".join(tech_words).strip()
 
     if technique_candidate:
-        result.technique = technique_candidate
+        # Normalize through the taxonomy so "d'arce" → "darce choke" etc.
+        normalized = normalize_technique(technique_candidate)
+        result.technique = normalized if normalized else technique_candidate
 
-    # Whatever we couldn't parse
     result.residual = technique_candidate if not position_found and not detected_type else ""
-
     result.is_structured = bool(result.technique or result.position)
 
     logger.debug("Parsed %r → %s", query, result)

@@ -13,8 +13,8 @@ interface VideoPlayerProps {
 }
 
 const TRAIL_BUFFER_SEC = 15;
-const EXTEND_STEP_SEC  = 30;   // each press adds 30s
-const MAX_EXTENSIONS   = 2;    // max 2 presses → +60s total
+const EXTEND_STEP_SEC  = 60;   // each press adds 1 minute
+const MAX_EXTENSIONS   = 2;    // max 2 presses → +2min total
 
 export default function VideoPlayer({
   volumeId,
@@ -97,9 +97,9 @@ export default function VideoPlayer({
     }
   };
 
-  const segmentDuration = displayEnd - startTime;
+  const segmentDuration = playUntil - startTime;
   const segmentProgress = Math.min(
-    ((currentTime - startTime) / (displayEnd - startTime)) * 100,
+    ((currentTime - startTime) / (playUntil - startTime)) * 100,
     100
   );
 
@@ -159,8 +159,8 @@ export default function VideoPlayer({
                   disabled={extensions >= MAX_EXTENSIONS}
                   title={
                     extensions >= MAX_EXTENSIONS
-                      ? "Maximum extension reached (+60s)"
-                      : `Extend clip by 30s (${MAX_EXTENSIONS - extensions} left)`
+                      ? "Maximum extension reached (+2min)"
+                      : `Extend clip by 1min (${MAX_EXTENSIONS - extensions} left)`
                   }
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
                     extensions >= MAX_EXTENSIONS
@@ -168,15 +168,14 @@ export default function VideoPlayer({
                       : "text-emerald-300 bg-emerald-900/20 border-emerald-800 hover:bg-emerald-900/40"
                   }`}
                 >
-                  {/* +30s icon */}
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                       d="M12 4v16m8-8H4" />
                   </svg>
                   {extensions >= MAX_EXTENSIONS ? (
-                    <span>+60s max</span>
+                    <span>+2min max</span>
                   ) : (
-                    <span>+30s{extensions > 0 ? ` (${extensions}/${MAX_EXTENSIONS})` : ""}</span>
+                    <span>+1min{extensions > 0 ? ` (${extensions}/${MAX_EXTENSIONS})` : ""}</span>
                   )}
                 </button>
 
@@ -202,14 +201,14 @@ export default function VideoPlayer({
                 />
               </div>
               <span className="font-mono text-gray-600">
-                {formatTimestamp(displayEnd)}
+                {formatTimestamp(playUntil)}
               </span>
             </div>
 
             {/* Segment info */}
             <div className="flex items-center justify-between mt-2">
               <p className="text-xs text-gray-600">
-                {formatTimestamp(startTime)} — {formatTimestamp(displayEnd)}
+                {formatTimestamp(startTime)} — {formatTimestamp(playUntil)}
                 {" "}({Math.round(segmentDuration)}s)
               </p>
               {extensions > 0 && (

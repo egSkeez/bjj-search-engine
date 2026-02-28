@@ -40,20 +40,18 @@ def expand_query(query: str) -> str:
 def build_search_text(chunk: dict) -> str:
     """Build the text string that gets embedded for a chunk.
 
-    Field priority (most -> least important for BJJ search):
-      1. technique name  — repeated 3x so it dominates the vector
-      2. position        — repeated 2x
-      3. technique_type  — once (submission/sweep/pass context)
-      4. aliases         — all of them; critical for alternate-name search
-      5. description     — one-sentence summary
-      6. key_points      — coaching insights
-      7. transcript      — raw text excerpt (lowest signal, shortest excerpt)
+    Focused on the 5 fields that matter most for BJJ search:
+      1. technique name  — repeated 2x so it anchors the vector
+      2. position        — repeated 2x for positional context
+      3. technique_type  — category context (submission vs escape vs concept)
+      4. aliases         — synonym coverage (mata leao → rear naked choke)
+      5. description     — richest semantic summary sentence
     """
     parts = []
 
     technique = (chunk.get("technique") or "").strip()
     if technique:
-        parts.append(f"{technique}. {technique}. {technique}.")
+        parts.append(f"{technique}. {technique}.")
 
     position = (chunk.get("position") or "").strip()
     if position:
@@ -70,14 +68,6 @@ def build_search_text(chunk: dict) -> str:
     description = (chunk.get("description") or "").strip()
     if description:
         parts.append(description)
-
-    key_points = chunk.get("key_points")
-    if key_points and isinstance(key_points, list) and key_points:
-        parts.append(" | ".join(key_points))
-
-    transcript = chunk.get("text", "")
-    if transcript:
-        parts.append(transcript[:200])
 
     return "\n".join(parts)
 

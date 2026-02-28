@@ -7,13 +7,12 @@ import VideoPlayer from "./VideoPlayer";
 const TYPE_COLORS: Record<string, string> = {
   submission: "bg-red-900/50 text-red-300 border-red-800",
   sweep: "bg-green-900/50 text-green-300 border-green-800",
-  pass: "bg-blue-900/50 text-blue-300 border-blue-800",
+  "guard pass": "bg-blue-900/50 text-blue-300 border-blue-800",
+  "guard retention": "bg-teal-900/50 text-teal-300 border-teal-800",
   escape: "bg-yellow-900/50 text-yellow-300 border-yellow-800",
   takedown: "bg-purple-900/50 text-purple-300 border-purple-800",
-  transition: "bg-cyan-900/50 text-cyan-300 border-cyan-800",
+  counter: "bg-pink-900/50 text-pink-300 border-pink-800",
   control: "bg-orange-900/50 text-orange-300 border-orange-800",
-  defense: "bg-amber-900/50 text-amber-300 border-amber-800",
-  setup: "bg-indigo-900/50 text-indigo-300 border-indigo-800",
   concept: "bg-gray-800/50 text-gray-300 border-gray-700",
 };
 

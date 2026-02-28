@@ -8,6 +8,7 @@ from google.genai import types
 from google.genai import errors as gerrors
 
 from app.config import settings
+from app.services.taxonomy import normalize_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -19,27 +20,38 @@ class QuotaExhaustedError(RuntimeError):
     """Raised when the Gemini account has hit its quota / no billing active."""
 
 
-SYSTEM_PROMPT = """You are an expert BJJ (Brazilian Jiu-Jitsu) instructional analyst working with transcripts from elite-level instructional DVDs by coaches like John Danaher, Gordon Ryan, Craig Jones, Lachlan Giles, and others.
+SYSTEM_PROMPT = """You are an expert BJJ (Brazilian Jiu-Jitsu) instructional analyst working with transcripts from elite-level instructional DVDs.
 
 Your job: extract structured metadata AND the coach's most valuable insights from each transcript segment.
 
 Respond with ONLY valid JSON, no markdown, no explanation:
 {
-    "position": "the guard/position being played (e.g., closed guard, half guard, mount, side control, back mount, turtle, deep half, butterfly guard, single leg X, etc.)",
-    "technique": "the specific technique name using the most common English name (e.g., triangle choke, kimura, scissor sweep, knee cut pass). Use the coach's own terminology when they name it.",
-    "technique_type": "one of: submission, sweep, pass, escape, takedown, transition, control, defense, setup, concept",
+    "position": "<MUST be one of: closed guard, open guard, half guard, butterfly guard, deep half guard, de la riva guard, reverse de la riva guard, x guard, single leg x, spider guard, lasso guard, rubber guard, octopus guard, z guard, mount, side control, back control, north south, turtle, front headlock, leg entanglement, standing, seated guard, top position, bottom position, crucifix, truck, 50/50>",
+    "technique": "<the specific technique name — use the most common English name. Group related moves: e.g. all heel hooks/toe holds/knee bars are 'leglocks', darce/brabo are 'darce choke', all guillotine variants are 'guillotine'. Use the coach's own name when they give a specific one.>",
+    "technique_type": "<MUST be exactly one of: submission, sweep, guard pass, guard retention, escape, takedown, counter, control, concept>",
     "aliases": ["ALL alternative names including Japanese, Portuguese, nicknames, abbreviations, and coach-specific terminology"],
-    "description": "One sentence: what is being taught and why it matters. Written so someone can decide in 5 seconds if this is the clip they want.",
-    "key_points": [
-        "3 to 5 bullet points. Each is a concise, specific coaching insight — the kind of detail that makes the difference between understanding and not understanding the move. Quote or closely paraphrase the coach's actual words when they're particularly precise or memorable. Focus on: WHY the mechanic works, the exact body position/alignment required, common mistakes and how to avoid them, grip details, weight distribution, timing cues, or any principle the coach emphasizes repeatedly."
-    ]
+    "description": "One sentence: what is being taught and why it matters.",
+    "key_points": ["3 to 5 bullet points with the coach's most valuable specific insights."]
 }
 
+CATEGORY DEFINITIONS (technique_type):
+- submission: goal is to break/choke the opponent and get them to tap
+- sweep: goal is to reverse position and get to an advantageous position (includes reversals)
+- guard pass: goal is to pass the opponent's guard
+- guard retention: goal is to prevent the opponent from passing your guard
+- escape: goal is to get out of a bad position or a submission hold
+- takedown: goal is to bring a standing opponent down to the mat
+- counter: going from being submitted to submitting the opponent
+- control: positional dominance — pins, grips, pressure, transitions between positions
+- concept: coach explaining theory/principles/strategy without demonstrating a specific technique
+
 Rules:
-- Be very specific with technique names. Include all known aliases — critical for search.
-- If the segment is conceptual (posture theory, grip fighting principles, strategic frameworks), use technique_type "concept" but still extract key_points from the conceptual insights.
-- If you cannot identify the technique, set technique to "unidentified" and use key_points to capture what IS being discussed.
-- key_points should read as standalone insights — someone should be able to read them without the transcript and learn something concrete."""
+- position MUST be from the fixed list above. Pick the closest match.
+- technique_type MUST be exactly one value from the list above. Never combine multiple.
+- Group related techniques under one name (e.g. all leg entanglement attacks = "heel hook" or "knee bar", not "outside ashi garami heel hook").
+- Include all known aliases for searchability.
+- If the segment is conceptual, use technique_type "concept".
+- If you cannot identify the technique, set technique to "unidentified"."""
 
 TAGGING_MODEL = "gemini-2.5-flash"
 BATCH_SIZE = 10
@@ -118,6 +130,8 @@ def tag_single_chunk(client: genai.Client, chunk: dict) -> dict:
         chunk["description"] = parsed.get("description", "")
         chunk["key_points"] = parsed.get("key_points", [])
         chunk["llm_raw_response"] = parsed
+
+        normalize_chunk(chunk)
 
     except json.JSONDecodeError as e:
         logger.error("Failed to parse Gemini response for chunk %s: %s", chunk.get("id"), e)

@@ -1,19 +1,14 @@
-"""Search API — structured-first with vector fallback.
+"""Search API — vector-first with structured re-ranking.
 
 The search strategy:
-  1. Parse the natural language query into structured intent
-     (technique, position, type)
-  2. Query Postgres directly on structured fields with weighted scoring:
-       - technique match  → highest weight
-       - position match   → high weight
-       - type match       → moderate weight
-       - alias match      → bonus
-       - description/text → weak fallback
-  3. If the query is too vague for structured search, fall back to
-     vector similarity via Qdrant
-  4. Score is a 0–1 relevance value with clear differentiation
+  1. Always start with vector similarity search via Qdrant (semantic matching)
+  2. Parse the query for structured intent (technique, position, type)
+  3. Re-rank vector results by boosting chunks that also match structured fields
+  4. If vector search is unavailable, fall back to structured Postgres search
+  5. Last resort: raw text ILIKE
 """
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -25,6 +20,9 @@ from app.database import get_db
 from app.models import Chunk, DVD, Volume
 from app.schemas import BrowseResponse, ChunkOut, SearchResponse, SearchResult
 from app.services.query_parser import parse_query
+from app.services.taxonomy import CATEGORIES, POSITIONS, normalize_category, normalize_position
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
 
@@ -52,46 +50,142 @@ def _chunk_to_out(chunk: Chunk) -> ChunkOut:
     )
 
 
+def _compute_struct_boost(chunk: Chunk, parsed) -> float:
+    """Compute a structured-field boost (0.0–0.30) for re-ranking vector results.
+
+    This rewards chunks whose metadata explicitly matches the parsed query intent,
+    on top of the vector similarity score.
+    """
+    boost = 0.0
+
+    if parsed.technique:
+        tech_term = parsed.technique.lower()
+        chunk_tech = (chunk.technique or "").lower()
+        chunk_aliases = " ".join(chunk.aliases or []).lower()
+
+        if chunk_tech == tech_term:
+            boost += 0.15
+        elif tech_term in chunk_tech or chunk_tech in tech_term:
+            boost += 0.10
+        elif tech_term in chunk_aliases:
+            boost += 0.08
+
+    if parsed.position and parsed.position_variants:
+        chunk_pos = (chunk.position or "").lower()
+        for v in parsed.position_variants:
+            if chunk_pos == v.lower():
+                boost += 0.10
+                break
+            if v.lower() in chunk_pos:
+                boost += 0.05
+                break
+
+    if parsed.technique_type:
+        if (chunk.technique_type or "").lower() == parsed.technique_type.lower():
+            boost += 0.05
+
+    return boost
+
+
 # ────────────────────────────────────────────────────────────────
-# Structured search — the primary search path
+# Vector search — the primary search path
+# ────────────────────────────────────────────────────────────────
+
+async def _vector_search(
+    q: str,
+    parsed,
+    mode: str,
+    position: str | None,
+    type_filter: str | None,
+    limit: int,
+    offset: int,
+    db: AsyncSession,
+) -> SearchResponse | None:
+    """Vector similarity search via Qdrant with structured re-ranking."""
+    try:
+        from app.services.vector_store import search_chunks as vector_search
+
+        filters: dict = {"chunk_type": mode}
+        if position:
+            filters["position"] = position
+        if type_filter:
+            filters["technique_type"] = type_filter
+
+        fetch_limit = max((limit + offset) * 3, 60)
+        vector_results = vector_search(q, limit=fetch_limit, filters=filters)
+
+        if not vector_results:
+            return None
+
+        chunk_ids = [UUID(r["id"]) for r in vector_results]
+        vector_scores = {r["id"]: r["score"] for r in vector_results}
+
+        stmt = (
+            select(Chunk)
+            .options(joinedload(Chunk.volume).joinedload(Volume.dvd))
+            .where(Chunk.id.in_(chunk_ids))
+        )
+        result = await db.execute(stmt)
+        chunks_by_id = {str(c.id): c for c in result.scalars().unique().all()}
+
+        scored: list[SearchResult] = []
+        for cid_uuid in chunk_ids:
+            cid = str(cid_uuid)
+            if cid not in chunks_by_id:
+                continue
+            chunk = chunks_by_id[cid]
+            vec_score = vector_scores.get(cid, 0.0)
+            struct_boost = _compute_struct_boost(chunk, parsed)
+            final_score = vec_score + struct_boost
+
+            scored.append(SearchResult(
+                chunk=_chunk_to_out(chunk),
+                score=round(final_score, 4),
+            ))
+
+        scored.sort(key=lambda r: r.score, reverse=True)
+
+        # Normalize scores so the best result = 1.0
+        if scored:
+            max_score = scored[0].score or 1.0
+            for s in scored:
+                s.score = round(s.score / max_score, 4)
+
+        page = scored[offset: offset + limit]
+        return SearchResponse(query=q, results=page, total=len(scored))
+    except Exception as exc:
+        logger.warning("Vector search failed, will fall back: %s", exc)
+        return None
+
+
+# ────────────────────────────────────────────────────────────────
+# Structured search — fallback when vector search is unavailable
 # ────────────────────────────────────────────────────────────────
 
 def _build_structured_query(
     parsed, mode: str, position_filter: str | None, type_filter: str | None, limit: int, offset: int
 ):
-    """Build a Postgres query that scores chunks by structured field match.
-
-    Returns (stmt, count_stmt) — the results query and a count query.
-    """
+    """Build a Postgres query that scores chunks by structured field match."""
     alias_str = func.lower(func.array_to_string(Chunk.aliases, " "))
 
-    # ── Technique score (0 or 0.45) ──────────────────────────
     if parsed.technique:
         tech_term = parsed.technique.lower()
-        # Exact technique name match
         tech_exact = case(
             (func.lower(Chunk.technique) == tech_term, literal(0.45)),
-            # technique name contains the search term
             (func.lower(Chunk.technique).contains(tech_term), literal(0.38)),
-            # search term contains the technique name (query is more specific)
             (literal(tech_term).contains(func.lower(Chunk.technique)), literal(0.30)),
-            # any alias matches
             (alias_str.contains(tech_term), literal(0.32)),
-            # technique word overlap
             *[
                 (func.lower(Chunk.technique).contains(w), literal(0.15))
                 for w in tech_term.split() if len(w) > 2
             ],
-            # description mentions it
             (func.lower(Chunk.description).contains(tech_term), literal(0.10)),
-            # transcript mentions it
             (func.lower(Chunk.text).contains(tech_term), literal(0.05)),
             else_=literal(0.0),
         )
     else:
         tech_exact = literal(0.0)
 
-    # ── Position score (0 or 0.30) ───────────────────────────
     if parsed.position and parsed.position_variants:
         variants = parsed.position_variants
         pos_exact = case(
@@ -115,7 +209,6 @@ def _build_structured_query(
     else:
         pos_exact = literal(0.0)
 
-    # ── Type score (0 or 0.15) ───────────────────────────────
     if parsed.technique_type:
         type_score = case(
             (func.lower(Chunk.technique_type) == parsed.technique_type.lower(), literal(0.15)),
@@ -124,7 +217,6 @@ def _build_structured_query(
     else:
         type_score = literal(0.0)
 
-    # ── Bonus for text/description mentioning raw query (0 or 0.10) ──
     raw_lower = parsed.raw_query.lower()
     text_bonus = case(
         (func.lower(Chunk.description).contains(raw_lower), literal(0.10)),
@@ -134,8 +226,6 @@ def _build_structured_query(
 
     total_score = cast(tech_exact + pos_exact + type_score + text_bonus, SAFloat).label("relevance")
 
-    # ── Build WHERE clause ────────────────────────────────────
-    # Must match at least one structured field to be a candidate
     conditions = []
     if parsed.technique:
         tech_term = parsed.technique.lower()
@@ -145,66 +235,28 @@ def _build_structured_query(
             alias_str.contains(tech_term),
             func.lower(Chunk.description).contains(tech_term),
         ]
-        # Also match individual technique words
         for w in tech_words:
             tech_conditions.append(func.lower(Chunk.technique).contains(w))
             tech_conditions.append(alias_str.contains(w))
         conditions.append(or_(*tech_conditions))
 
     if parsed.position and parsed.position_variants:
-        pos_conditions = []
-        for v in parsed.position_variants:
-            pos_conditions.append(func.lower(Chunk.position).contains(v.lower()))
+        pos_conditions = [
+            func.lower(Chunk.position).contains(v.lower())
+            for v in parsed.position_variants
+        ]
         if pos_conditions:
             conditions.append(or_(*pos_conditions))
 
     if parsed.technique_type:
         conditions.append(func.lower(Chunk.technique_type) == parsed.technique_type.lower())
 
-    # Always filter by chunk_type (granular/semantic)
     conditions.append(Chunk.chunk_type == mode)
 
-    # Apply user's explicit filters
     if position_filter:
-        conditions.append(func.lower(Chunk.position).contains(position_filter.lower()))
+        conditions.append(func.lower(Chunk.position) == position_filter.lower())
     if type_filter:
         conditions.append(func.lower(Chunk.technique_type) == type_filter.lower())
-
-    # If we have technique + position, require BOTH to match (AND logic)
-    # But each individual field uses OR on its variants
-    if parsed.technique and parsed.position:
-        # Build separate conditions and AND them
-        tech_term = parsed.technique.lower()
-        tech_words = [w for w in tech_term.split() if len(w) > 2]
-        tech_or = [
-            func.lower(Chunk.technique).contains(tech_term),
-            alias_str.contains(tech_term),
-        ]
-        for w in tech_words:
-            tech_or.append(func.lower(Chunk.technique).contains(w))
-            tech_or.append(alias_str.contains(w))
-
-        pos_or = [
-            func.lower(Chunk.position).contains(v.lower())
-            for v in parsed.position_variants
-        ]
-
-        # Primary: both match. Secondary: just technique matches (lower score).
-        # We fetch both and let the scoring sort them.
-        combined_where = [
-            Chunk.chunk_type == mode,
-            or_(
-                # Both match (will score high)
-                or_(*tech_or) & or_(*pos_or) if pos_or else or_(*tech_or),
-                # Just technique (will score lower due to missing position score)
-                or_(*tech_or),
-            ),
-        ]
-        if position_filter:
-            combined_where.append(func.lower(Chunk.position).contains(position_filter.lower()))
-        if type_filter:
-            combined_where.append(func.lower(Chunk.technique_type) == type_filter.lower())
-        conditions = combined_where
 
     stmt = (
         select(Chunk, total_score)
@@ -215,63 +267,8 @@ def _build_structured_query(
         .offset(offset)
     )
 
-    count_conditions = [c for c in conditions]
-    count_stmt = select(func.count(Chunk.id)).where(*count_conditions)
-
+    count_stmt = select(func.count(Chunk.id)).where(*conditions)
     return stmt, count_stmt
-
-
-# ────────────────────────────────────────────────────────────────
-# Vector search — fallback for conceptual/vague queries
-# ────────────────────────────────────────────────────────────────
-
-async def _vector_search(
-    q: str, mode: str, position: str | None, type_filter: str | None,
-    limit: int, offset: int, db: AsyncSession,
-) -> SearchResponse | None:
-    """Attempt vector similarity search via Qdrant. Returns None if unavailable."""
-    try:
-        from app.services.vector_store import search_chunks as vector_search
-
-        filters: dict = {"chunk_type": mode}
-        if position:
-            filters["position"] = position
-        if type_filter:
-            filters["technique_type"] = type_filter
-
-        fetch_limit = (limit + offset) * 3
-        vector_results = vector_search(q, limit=fetch_limit, filters=filters)
-
-        if not vector_results:
-            return None
-
-        chunk_ids = [UUID(r["id"]) for r in vector_results]
-        vector_scores = {r["id"]: r["score"] for r in vector_results}
-
-        stmt = (
-            select(Chunk)
-            .options(joinedload(Chunk.volume).joinedload(Volume.dvd))
-            .where(Chunk.id.in_(chunk_ids))
-        )
-        result = await db.execute(stmt)
-        chunks_by_id = {str(c.id): c for c in result.scalars().unique().all()}
-
-        scored: list[SearchResult] = []
-        for cid_uuid in chunk_ids:
-            cid = str(cid_uuid)
-            if cid not in chunks_by_id:
-                continue
-            vec_score = vector_scores.get(cid, 0.0)
-            scored.append(SearchResult(
-                chunk=_chunk_to_out(chunks_by_id[cid]),
-                score=round(vec_score * 0.85, 4),  # Scale down so vector results don't appear inflated
-            ))
-
-        scored.sort(key=lambda r: r.score, reverse=True)
-        page = scored[offset: offset + limit]
-        return SearchResponse(query=q, results=page, total=len(scored))
-    except Exception:
-        return None
 
 
 # ────────────────────────────────────────────────────────────────
@@ -291,13 +288,24 @@ async def search(
     """Search across all indexed BJJ chunks.
 
     Strategy:
-      1. Parse the query into structured intent (technique, position, type).
-      2. If structured fields found → query Postgres with weighted scoring.
-      3. Otherwise → fall back to vector similarity search.
+      1. Always try vector search first (semantic similarity via Qdrant).
+      2. Re-rank results with structured field boosts from parsed query.
+      3. If vector search fails, fall back to structured Postgres search.
+      4. Last resort: raw text ILIKE.
     """
     parsed = parse_query(q)
 
-    # ── Path 1: Structured search ───────────────────────────
+    if position:
+        position = normalize_position(position) or position
+    if type:
+        type = normalize_category(type) or type
+
+    # ── Path 1: Vector search (primary) ──────────────────────
+    vector_resp = await _vector_search(q, parsed, mode, position, type, limit, offset, db)
+    if vector_resp and vector_resp.results:
+        return vector_resp
+
+    # ── Path 2: Structured search (fallback) ─────────────────
     if parsed.is_structured:
         stmt, count_stmt = _build_structured_query(
             parsed, mode, position, type, limit, offset
@@ -310,7 +318,6 @@ async def search(
         total = count_result.scalar() or 0
 
         if rows:
-            # Normalize scores: highest result → 1.0
             max_score = max(r[1] for r in rows) or 1.0
             results = [
                 SearchResult(
@@ -321,19 +328,7 @@ async def search(
             ]
             return SearchResponse(query=q, results=results, total=total)
 
-        # Structured search found nothing — try vector as fallback
-        vector_resp = await _vector_search(q, mode, position, type, limit, offset, db)
-        if vector_resp:
-            return vector_resp
-
-        return SearchResponse(query=q, results=[], total=0)
-
-    # ── Path 2: No structure detected → vector search ──────
-    vector_resp = await _vector_search(q, mode, position, type, limit, offset, db)
-    if vector_resp:
-        return vector_resp
-
-    # ── Path 3: Last resort — raw text ILIKE ───────────────
+    # ── Path 3: Last resort — raw text ILIKE ─────────────────
     search_term = f"%{q}%"
     base_where = [
         or_(
@@ -352,9 +347,9 @@ async def search(
         .where(*base_where)
     )
     if position:
-        stmt = stmt.where(Chunk.position.ilike(f"%{position}%"))
+        stmt = stmt.where(func.lower(Chunk.position) == position.lower())
     if type:
-        stmt = stmt.where(Chunk.technique_type == type)
+        stmt = stmt.where(func.lower(Chunk.technique_type) == type.lower())
     stmt = stmt.order_by(Chunk.created_at.desc()).offset(offset).limit(limit)
 
     result = await db.execute(stmt)
@@ -362,9 +357,9 @@ async def search(
 
     count_stmt = select(func.count(Chunk.id)).where(*base_where)
     if position:
-        count_stmt = count_stmt.where(Chunk.position.ilike(f"%{position}%"))
+        count_stmt = count_stmt.where(func.lower(Chunk.position) == position.lower())
     if type:
-        count_stmt = count_stmt.where(Chunk.technique_type == type)
+        count_stmt = count_stmt.where(func.lower(Chunk.technique_type) == type.lower())
     total_result = await db.execute(count_stmt)
     total = total_result.scalar() or 0
 
@@ -373,7 +368,7 @@ async def search(
 
 
 # ────────────────────────────────────────────────────────────────
-# Browse and filter endpoints (unchanged)
+# Browse and filter endpoints
 # ────────────────────────────────────────────────────────────────
 
 @router.get("/browse", response_model=BrowseResponse)
@@ -391,9 +386,9 @@ async def browse(
     )
 
     if position:
-        stmt = stmt.where(Chunk.position.ilike(f"%{position}%"))
+        stmt = stmt.where(func.lower(Chunk.position) == position.lower())
     if type:
-        stmt = stmt.where(Chunk.technique_type == type)
+        stmt = stmt.where(func.lower(Chunk.technique_type) == type.lower())
 
     stmt = stmt.order_by(Chunk.position, Chunk.technique).offset(offset).limit(limit)
 
@@ -402,9 +397,9 @@ async def browse(
 
     count_stmt = select(func.count(Chunk.id))
     if position:
-        count_stmt = count_stmt.where(Chunk.position.ilike(f"%{position}%"))
+        count_stmt = count_stmt.where(func.lower(Chunk.position) == position.lower())
     if type:
-        count_stmt = count_stmt.where(Chunk.technique_type == type)
+        count_stmt = count_stmt.where(func.lower(Chunk.technique_type) == type.lower())
 
     total_result = await db.execute(count_stmt)
     total = total_result.scalar() or 0
@@ -418,21 +413,12 @@ async def browse(
 
 
 @router.get("/positions")
-async def list_positions(db: AsyncSession = Depends(get_db)):
-    """Return distinct positions in the database for filter dropdowns."""
-    stmt = select(Chunk.position).where(Chunk.position.isnot(None)).distinct().order_by(Chunk.position)
-    result = await db.execute(stmt)
-    return [row[0] for row in result.all() if row[0]]
+async def list_positions():
+    """Return the fixed canonical positions for filter dropdowns."""
+    return [p for p in POSITIONS if p]
 
 
 @router.get("/technique-types")
-async def list_technique_types(db: AsyncSession = Depends(get_db)):
-    """Return distinct technique types for filter checkboxes."""
-    stmt = (
-        select(Chunk.technique_type)
-        .where(Chunk.technique_type.isnot(None))
-        .distinct()
-        .order_by(Chunk.technique_type)
-    )
-    result = await db.execute(stmt)
-    return [row[0] for row in result.all() if row[0]]
+async def list_technique_types():
+    """Return the fixed canonical technique types for filter checkboxes."""
+    return CATEGORIES

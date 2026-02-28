@@ -17,6 +17,7 @@ from google.genai import types
 from google.genai import errors as gerrors
 
 from app.config import settings
+from app.services.taxonomy import normalize_category, normalize_position, normalize_technique
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ For each section, provide:
 3. section_type: one of "demonstration", "theory", "drilling", "rolling_footage", "intro_outro"
 4. technique: specific technique name (use coach's terminology when possible)
 5. position: the guard/position being played
-6. technique_type: one of "submission", "sweep", "pass", "escape", "takedown", "transition", "control", "defense", "setup", "concept"
+6. technique_type: MUST be exactly one of "submission", "sweep", "guard pass", "guard retention", "escape", "takedown", "counter", "control", "concept"
 7. description: one sentence — what is being taught and why it matters
 8. key_points: 3-5 bullet points with the coach's most valuable insights
 9. aliases: alternative names for the technique
@@ -174,6 +175,12 @@ def detect_technique_boundaries(
         sec.setdefault("key_points", [])
         sec.setdefault("aliases", [])
         sec.setdefault("section_type", "demonstration")
+
+        # Normalize to canonical taxonomy
+        sec["technique_type"] = normalize_category(sec.get("technique_type"))
+        sec["position"] = normalize_position(sec.get("position"))
+        sec["technique"] = normalize_technique(sec.get("technique"))
+
         validated.append(sec)
 
     # Ensure no gaps — extend each section's end to the next section's start
