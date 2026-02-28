@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Data / media (large files — not tracked in git)
+data/
+backend/data/
+backend/whisper.cpp/
+backend/whisper-model/
+*.wav
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# Database / vector store files
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.cursor/
+.vscode/
+
+# Alembic
+backend/alembic/versions/__pycache__/
+
+# Test artifacts
+backend/retag_semantic.log
+backend/semantic_chunks.log
+backend/reembed_all.log
