@@ -9,7 +9,7 @@ import { search, type SearchResponse, type SearchMode } from "@/lib/api";
 const MODE_CONFIG: Record<SearchMode, { label: string; description: string; icon: string }> = {
   granular: {
     label: "Segments",
-    description: "Short clips — precise moment-level results",
+    description: "Short clips - precise moment-level results",
     icon: "M4 6h16M4 10h16M4 14h16M4 18h16",
   },
   semantic: {
@@ -25,17 +25,33 @@ export default function HomePage() {
   const [currentQuery, setCurrentQuery] = useState("");
   const [position, setPosition] = useState<string | null>(null);
   const [type, setType] = useState<string | null>(null);
+  const [instructor, setInstructor] = useState<string | null>(null);
+  const [dvdId, setDvdId] = useState<string | null>(null);
+  const [hideConcepts, setHideConcepts] = useState(false);
   const [mode, setMode] = useState<SearchMode>("granular");
 
   const doSearch = useCallback(
-    async (q: string, pos?: string | null, typ?: string | null, mod?: SearchMode) => {
+    async (
+      q: string,
+      overrides?: {
+        pos?: string | null;
+        typ?: string | null;
+        mod?: SearchMode;
+        inst?: string | null;
+        dvd?: string | null;
+        hide?: boolean;
+      }
+    ) => {
       setLoading(true);
       setCurrentQuery(q);
       try {
         const data = await search(q, {
-          position: (pos ?? position) || undefined,
-          type: (typ ?? type) || undefined,
-          mode: mod ?? mode,
+          position: (overrides?.pos ?? position) || undefined,
+          type: (overrides?.typ ?? type) || undefined,
+          mode: overrides?.mod ?? mode,
+          instructor: (overrides?.inst ?? instructor) || undefined,
+          dvd_id: (overrides?.dvd ?? dvdId) || undefined,
+          hide_concepts: overrides?.hide ?? hideConcepts,
         });
         setResults(data);
       } catch {
@@ -44,22 +60,11 @@ export default function HomePage() {
         setLoading(false);
       }
     },
-    [position, type, mode]
+    [position, type, mode, instructor, dvdId, hideConcepts]
   );
 
-  const handlePositionChange = (p: string | null) => {
-    setPosition(p);
-    if (currentQuery) doSearch(currentQuery, p, type);
-  };
-
-  const handleTypeChange = (t: string | null) => {
-    setType(t);
-    if (currentQuery) doSearch(currentQuery, position, t);
-  };
-
-  const handleModeChange = (m: SearchMode) => {
-    setMode(m);
-    if (currentQuery) doSearch(currentQuery, position, type, m);
+  const reSearch = (overrides: Record<string, unknown>) => {
+    if (currentQuery) doSearch(currentQuery, overrides as never);
   };
 
   return (
@@ -86,7 +91,10 @@ export default function HomePage() {
         {(Object.entries(MODE_CONFIG) as [SearchMode, typeof MODE_CONFIG[SearchMode]][]).map(([key, cfg]) => (
           <button
             key={key}
-            onClick={() => handleModeChange(key)}
+            onClick={() => {
+              setMode(key);
+              reSearch({ mod: key });
+            }}
             title={cfg.description}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-all ${
               mode === key
@@ -111,8 +119,14 @@ export default function HomePage() {
             <FilterSidebar
               selectedPosition={position}
               selectedType={type}
-              onPositionChange={handlePositionChange}
-              onTypeChange={handleTypeChange}
+              selectedInstructor={instructor}
+              selectedDvdId={dvdId}
+              hideConcepts={hideConcepts}
+              onPositionChange={(p) => { setPosition(p); reSearch({ pos: p }); }}
+              onTypeChange={(t) => { setType(t); reSearch({ typ: t }); }}
+              onInstructorChange={(i) => { setInstructor(i); reSearch({ inst: i }); }}
+              onDvdIdChange={(d) => { setDvdId(d); reSearch({ dvd: d }); }}
+              onHideConceptsChange={(h) => { setHideConcepts(h); reSearch({ hide: h }); }}
             />
           </aside>
 

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatTimestamp, type ChunkResult } from "@/lib/api";
+import { isBookmarked, toggleBookmark } from "@/lib/bookmarks";
 import VideoPlayer from "./VideoPlayer";
 
 const TYPE_COLORS: Record<string, string> = {
@@ -60,6 +61,14 @@ interface ChunkCardProps {
 export default function ChunkCard({ chunk, score }: ChunkCardProps) {
   const [showPlayer, setShowPlayer] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setSaved(isBookmarked(chunk.id));
+    const handler = () => setSaved(isBookmarked(chunk.id));
+    window.addEventListener("bookmarks-changed", handler);
+    return () => window.removeEventListener("bookmarks-changed", handler);
+  }, [chunk.id]);
 
   const typeColor = chunk.technique_type
     ? TYPE_COLORS[chunk.technique_type] || TYPE_COLORS.concept
@@ -121,16 +130,34 @@ export default function ChunkCard({ chunk, score }: ChunkCardProps) {
               {score !== undefined && score > 0 && (
                 <RelevanceBar score={score} />
               )}
-              <button
-                onClick={() => setShowPlayer(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-bjj-300 bg-bjj-900/30 border border-bjj-800 rounded-lg hover:bg-bjj-900/50 hover:text-bjj-200 transition-colors"
-                title="Play this segment"
-              >
-                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-                Play
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => {
+                    toggleBookmark(chunk);
+                    setSaved(!saved);
+                  }}
+                  title={saved ? "Remove from playlist" : "Save to playlist"}
+                  className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                    saved
+                      ? "text-amber-300 bg-amber-900/30 border-amber-800 hover:bg-amber-900/50"
+                      : "text-gray-500 bg-gray-900/30 border-gray-800 hover:text-amber-300 hover:border-amber-800"
+                  }`}
+                >
+                  <svg className="w-3.5 h-3.5" fill={saved ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setShowPlayer(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-bjj-300 bg-bjj-900/30 border border-bjj-800 rounded-lg hover:bg-bjj-900/50 hover:text-bjj-200 transition-colors"
+                  title="Play this segment"
+                >
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                  Play
+                </button>
+              </div>
             </div>
           </div>
 

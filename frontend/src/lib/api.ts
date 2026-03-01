@@ -66,14 +66,25 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export type SearchMode = "granular" | "semantic";
 
-export async function search(
-  q: string,
-  opts?: { position?: string; type?: string; mode?: SearchMode; limit?: number; offset?: number }
-): Promise<SearchResponse> {
+export interface SearchOpts {
+  position?: string;
+  type?: string;
+  mode?: SearchMode;
+  instructor?: string;
+  dvd_id?: string;
+  hide_concepts?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export async function search(q: string, opts?: SearchOpts): Promise<SearchResponse> {
   const params = new URLSearchParams({ q });
   if (opts?.position) params.set("position", opts.position);
   if (opts?.type) params.set("type", opts.type);
   if (opts?.mode) params.set("mode", opts.mode);
+  if (opts?.instructor) params.set("instructor", opts.instructor);
+  if (opts?.dvd_id) params.set("dvd_id", opts.dvd_id);
+  if (opts?.hide_concepts) params.set("hide_concepts", "true");
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
   return apiFetch(`/api/search?${params}`);
@@ -111,6 +122,20 @@ export async function getPositions(): Promise<string[]> {
 
 export async function getTechniqueTypes(): Promise<string[]> {
   return apiFetch("/api/technique-types");
+}
+
+export async function getInstructors(): Promise<string[]> {
+  return apiFetch("/api/instructors");
+}
+
+export interface DVDListItem {
+  id: string;
+  title: string;
+  instructor: string | null;
+}
+
+export async function getDVDsList(): Promise<DVDListItem[]> {
+  return apiFetch("/api/dvds-list");
 }
 
 export async function getIngestJobs(): Promise<IngestJob[]> {

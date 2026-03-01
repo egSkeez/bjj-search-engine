@@ -100,6 +100,9 @@ async def _vector_search(
     limit: int,
     offset: int,
     db: AsyncSession,
+    instructor: str | None = None,
+    dvd_id: str | None = None,
+    hide_concepts: bool = False,
 ) -> SearchResponse | None:
     """Vector similarity search via Qdrant with structured re-ranking."""
     try:
@@ -134,6 +137,17 @@ async def _vector_search(
             if cid not in chunks_by_id:
                 continue
             chunk = chunks_by_id[cid]
+
+            if hide_concepts and (chunk.technique_type or "").lower() == "concept":
+                continue
+            if instructor:
+                dvd = chunk.volume.dvd if chunk.volume else None
+                if not dvd or (dvd.instructor or "").lower() != instructor.lower():
+                    continue
+            if dvd_id:
+                if not chunk.volume or str(chunk.volume.dvd_id) != dvd_id:
+                    continue
+
             vec_score = vector_scores.get(cid, 0.0)
             struct_boost = _compute_struct_boost(chunk, parsed)
             final_score = vec_score + struct_boost
@@ -145,7 +159,6 @@ async def _vector_search(
 
         scored.sort(key=lambda r: r.score, reverse=True)
 
-        # Normalize scores so the best result = 1.0
         if scored:
             max_score = scored[0].score or 1.0
             for s in scored:
@@ -275,24 +288,36 @@ def _build_structured_query(
 # Main search endpoint
 # ────────────────────────────────────────────────────────────────
 
+def _apply_extra_filters(
+    stmt, chunk_ids_or_stmt, *,
+    instructor: str | None,
+    dvd_id: str | None,
+    hide_concepts: bool,
+):
+    """Apply instructor / DVD / hide-concepts filters to a query."""
+    if hide_concepts:
+        stmt = stmt.where(func.lower(Chunk.technique_type) != "concept")
+    if instructor:
+        stmt = stmt.where(func.lower(DVD.instructor) == instructor.lower())
+    if dvd_id:
+        stmt = stmt.where(Volume.dvd_id == dvd_id)
+    return stmt
+
+
 @router.get("/search", response_model=SearchResponse)
 async def search(
     q: str = Query(..., min_length=1),
     position: str | None = Query(None),
     type: str | None = Query(None, alias="type"),
     mode: str = Query("granular", pattern="^(granular|semantic)$"),
+    instructor: str | None = Query(None),
+    dvd_id: str | None = Query(None),
+    hide_concepts: bool = Query(False),
     limit: int = Query(20, le=100),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search across all indexed BJJ chunks.
-
-    Strategy:
-      1. Always try vector search first (semantic similarity via Qdrant).
-      2. Re-rank results with structured field boosts from parsed query.
-      3. If vector search fails, fall back to structured Postgres search.
-      4. Last resort: raw text ILIKE.
-    """
+    """Search across all indexed BJJ chunks."""
     parsed = parse_query(q)
 
     if position:
@@ -300,8 +325,12 @@ async def search(
     if type:
         type = normalize_category(type) or type
 
+    extra = dict(instructor=instructor, dvd_id=dvd_id, hide_concepts=hide_concepts)
+
     # ── Path 1: Vector search (primary) ──────────────────────
-    vector_resp = await _vector_search(q, parsed, mode, position, type, limit, offset, db)
+    vector_resp = await _vector_search(
+        q, parsed, mode, position, type, limit, offset, db, **extra
+    )
     if vector_resp and vector_resp.results:
         return vector_resp
 
@@ -310,6 +339,8 @@ async def search(
         stmt, count_stmt = _build_structured_query(
             parsed, mode, position, type, limit, offset
         )
+        stmt = _apply_extra_filters(stmt, None, **extra)
+        count_stmt = _apply_extra_filters(count_stmt, None, **extra)
 
         result = await db.execute(stmt)
         rows = result.unique().all()
@@ -328,7 +359,7 @@ async def search(
             ]
             return SearchResponse(query=q, results=results, total=total)
 
-    # ── Path 3: Last resort — raw text ILIKE ─────────────────
+    # ── Path 3: Last resort -- raw text ILIKE ─────────────────
     search_term = f"%{q}%"
     base_where = [
         or_(
@@ -340,6 +371,8 @@ async def search(
         ),
         Chunk.chunk_type == mode,
     ]
+    if hide_concepts:
+        base_where.append(func.lower(Chunk.technique_type) != "concept")
 
     stmt = (
         select(Chunk)
@@ -350,6 +383,12 @@ async def search(
         stmt = stmt.where(func.lower(Chunk.position) == position.lower())
     if type:
         stmt = stmt.where(func.lower(Chunk.technique_type) == type.lower())
+    if instructor:
+        stmt = stmt.join(Volume, Chunk.volume_id == Volume.id).join(DVD, Volume.dvd_id == DVD.id)
+        stmt = stmt.where(func.lower(DVD.instructor) == instructor.lower())
+    if dvd_id:
+        stmt = stmt.join(Volume, Chunk.volume_id == Volume.id) if not instructor else stmt
+        stmt = stmt.where(Volume.dvd_id == dvd_id)
     stmt = stmt.order_by(Chunk.created_at.desc()).offset(offset).limit(limit)
 
     result = await db.execute(stmt)
@@ -422,3 +461,27 @@ async def list_positions():
 async def list_technique_types():
     """Return the fixed canonical technique types for filter checkboxes."""
     return CATEGORIES
+
+
+@router.get("/instructors")
+async def list_instructors(db: AsyncSession = Depends(get_db)):
+    """Return distinct instructors for filter dropdown."""
+    stmt = (
+        select(DVD.instructor)
+        .where(DVD.instructor.isnot(None), DVD.instructor != "")
+        .distinct()
+        .order_by(DVD.instructor)
+    )
+    result = await db.execute(stmt)
+    return [row[0] for row in result.all() if row[0]]
+
+
+@router.get("/dvds-list")
+async def list_dvds_for_filter(db: AsyncSession = Depends(get_db)):
+    """Return DVDs with id+title for filter dropdown."""
+    stmt = select(DVD.id, DVD.title, DVD.instructor).order_by(DVD.title)
+    result = await db.execute(stmt)
+    return [
+        {"id": str(row[0]), "title": row[1], "instructor": row[2]}
+        for row in result.all()
+    ]

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import Link from "next/link";
+import PlaylistBadge from "@/components/PlaylistBadge";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -30,6 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Link href="/library" className="text-sm text-gray-400 hover:text-white transition-colors">
                   Library
                 </Link>
+                <PlaylistBadge />
                 <Link href="/ingest" className="text-sm text-gray-400 hover:text-white transition-colors">
                   Ingest
                 </Link>

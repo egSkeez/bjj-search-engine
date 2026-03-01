@@ -1,5 +1,5 @@
 ##############################################################
-#  BJJ Search Engine — Stop Script
+#  BJJ Search Engine - Stop Script
 ##############################################################
 
 $ROOT = "C:\Users\Skeez\Documents\chunking"

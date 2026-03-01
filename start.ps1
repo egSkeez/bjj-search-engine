@@ -1,5 +1,5 @@
 ##############################################################
-#  BJJ Search Engine — Start Script
+#  BJJ Search Engine - Start Script
 #  Starts: Docker (Postgres + Qdrant), Backend, Frontend
 #  Usage:  .\start.ps1
 #          .\start.ps1 -NoBrowser   (skip auto-open browser)
@@ -15,7 +15,7 @@ $LOGS     = "$ROOT\logs"
 
 New-Item -ItemType Directory -Force -Path $LOGS | Out-Null
 
-# ── Helpers ───────────────────────────────────────────────
+# -- Helpers ---------------------------------------------------
 function Write-Step($n, $msg) {
     Write-Host ""
     Write-Host "  [$n] $msg" -ForegroundColor Cyan
@@ -49,7 +49,7 @@ function Test-Port($port) {
     } catch { return $false }
 }
 
-# ── Banner ────────────────────────────────────────────────
+# -- Banner ----------------------------------------------------
 Clear-Host
 Write-Host ""
 Write-Host "  ==========================================================" -ForegroundColor White
@@ -57,10 +57,9 @@ Write-Host "    BJJ Instructional Search Engine" -ForegroundColor White
 Write-Host "    $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
 Write-Host "  ==========================================================" -ForegroundColor White
 
-# ── 1. Docker — Postgres + Qdrant ─────────────────────────
+# -- 1. Docker - Postgres + Qdrant ----------------------------
 Write-Step "1/4" "Starting Docker services (Postgres + Qdrant)..."
 
-# Check Docker is running
 try {
     $null = docker info 2>&1
 } catch {
@@ -68,13 +67,12 @@ try {
     exit 1
 }
 
-# Start only db and qdrant (not the containerised backend/frontend)
 Set-Location $ROOT
 docker compose up -d db qdrant | Out-Null
 
 # Wait for Postgres
 $pgReady = $false
-$waited = 0
+$waited  = 0
 while ($waited -lt 30) {
     $check = docker compose exec -T db pg_isready -U bjj -d bjj_search 2>&1
     if ($check -match "accepting connections") { $pgReady = $true; break }
@@ -82,15 +80,14 @@ while ($waited -lt 30) {
     Write-Wait "Waiting for Postgres... ${waited}s"
 }
 if ($pgReady) { Write-OK "Postgres ready (port 5432)" }
-else          { Write-Fail "Postgres didn't start — check Docker Desktop" }
+else          { Write-Fail "Postgres did not start - check Docker Desktop" }
 
 # Wait for Qdrant
 if (Wait-Http "http://localhost:6333/healthz" "Qdrant" 30) {}
 
-# ── 2. Backend — FastAPI / uvicorn ────────────────────────
+# -- 2. Backend - FastAPI / uvicorn ---------------------------
 Write-Step "2/4" "Starting backend (FastAPI on :8000)..."
 
-# Kill any stale process on port 8000
 $stale = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
 if ($stale) {
     $stale | ForEach-Object {
@@ -100,7 +97,7 @@ if ($stale) {
 }
 
 $backendLog = "$LOGS\backend.log"
-"" | Set-Content $backendLog   # truncate
+"" | Set-Content $backendLog
 
 Start-Process pwsh -ArgumentList @(
     "-NoProfile", "-WindowStyle", "Minimized", "-Command",
@@ -110,10 +107,9 @@ Start-Process pwsh -ArgumentList @(
 
 $backendOK = Wait-Http "http://localhost:8000/api/health" "Backend" 60
 
-# ── 3. Frontend — Next.js dev server ──────────────────────
+# -- 3. Frontend - Next.js dev server -------------------------
 Write-Step "3/4" "Starting frontend (Next.js on :3000)..."
 
-# Kill any stale process on port 3000
 $stale3 = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
 if ($stale3) {
     $stale3 | ForEach-Object {
@@ -130,8 +126,7 @@ Start-Process pwsh -ArgumentList @(
     "Set-Location '$FRONTEND'; npm run dev *>> '$frontendLog'"
 ) -PassThru | Out-Null
 
-# Next.js takes longer — wait for the "ready" line in the log
-$waited = 0
+$waited     = 0
 $frontendOK = $false
 while ($waited -lt 60) {
     Start-Sleep -Seconds 2; $waited += 2
@@ -148,9 +143,9 @@ while ($waited -lt 60) {
     }
     Write-Wait "Waiting for Next.js... ${waited}s"
 }
-if (-not $frontendOK) { Write-Fail "Frontend didn't start — check $frontendLog" }
+if (-not $frontendOK) { Write-Fail "Frontend did not start - check $frontendLog" }
 
-# ── 4. Summary ────────────────────────────────────────────
+# -- 4. Summary -----------------------------------------------
 Write-Host ""
 Write-Host "  ==========================================================" -ForegroundColor White
 Write-Host "    All services started" -ForegroundColor Green
@@ -168,7 +163,7 @@ Write-Host "    To stop all services:" -ForegroundColor DarkGray
 Write-Host "      .\stop.ps1" -ForegroundColor DarkGray
 Write-Host ""
 
-# ── Open browser ──────────────────────────────────────────
+# -- Open browser ---------------------------------------------
 if (-not $NoBrowser -and $frontendOK) {
     Start-Process "http://localhost:3000"
 }
