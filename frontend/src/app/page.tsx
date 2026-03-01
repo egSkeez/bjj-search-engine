@@ -113,40 +113,38 @@ export default function HomePage() {
         </span>
       </div>
 
-      {(results || loading) && (
-        <div className="mt-10 flex gap-8">
-          <aside className="hidden lg:block w-56 shrink-0">
-            <FilterSidebar
-              selectedPosition={position}
-              selectedType={type}
-              selectedInstructor={instructor}
-              selectedDvdId={dvdId}
-              hideConcepts={hideConcepts}
-              onPositionChange={(p) => { setPosition(p); reSearch({ pos: p }); }}
-              onTypeChange={(t) => { setType(t); reSearch({ typ: t }); }}
-              onInstructorChange={(i) => { setInstructor(i); reSearch({ inst: i }); }}
-              onDvdIdChange={(d) => { setDvdId(d); reSearch({ dvd: d }); }}
-              onHideConceptsChange={(h) => { setHideConcepts(h); reSearch({ hide: h }); }}
-            />
-          </aside>
+      <div className="mt-10 flex gap-8">
+        <aside className="hidden lg:block w-56 shrink-0">
+          <FilterSidebar
+            selectedPosition={position}
+            selectedType={type}
+            selectedInstructor={instructor}
+            selectedDvdId={dvdId}
+            hideConcepts={hideConcepts}
+            onPositionChange={(p) => { setPosition(p); reSearch({ pos: p }); }}
+            onTypeChange={(t) => { setType(t); reSearch({ typ: t }); }}
+            onInstructorChange={(i) => { setInstructor(i); reSearch({ inst: i }); }}
+            onDvdIdChange={(d) => { setDvdId(d); reSearch({ dvd: d }); }}
+            onHideConceptsChange={(h) => { setHideConcepts(h); reSearch({ hide: h }); }}
+          />
+        </aside>
 
-          <div className="flex-1 min-w-0">
-            {loading ? (
-              <div className="space-y-3">
-                {[...Array(3)].map((_, i) => (
-                  <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-5 animate-pulse">
-                    <div className="h-5 bg-gray-800 rounded w-64 mb-3"></div>
-                    <div className="h-3 bg-gray-800 rounded w-32 mb-3"></div>
-                    <div className="h-3 bg-gray-800 rounded w-full"></div>
-                  </div>
-                ))}
-              </div>
-            ) : results ? (
-              <SearchResults results={results.results} total={results.total} query={results.query} />
-            ) : null}
-          </div>
+        <div className="flex-1 min-w-0">
+          {loading ? (
+            <div className="space-y-3">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-5 animate-pulse">
+                  <div className="h-5 bg-gray-800 rounded w-64 mb-3"></div>
+                  <div className="h-3 bg-gray-800 rounded w-32 mb-3"></div>
+                  <div className="h-3 bg-gray-800 rounded w-full"></div>
+                </div>
+              ))}
+            </div>
+          ) : results ? (
+            <SearchResults results={results.results} total={results.total} query={results.query} />
+          ) : null}
         </div>
-      )}
+      </div>
     </div>
   );
 }
